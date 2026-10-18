@@ -42,6 +42,7 @@
     pinchLatched: false,
     victoryLatched: false,
     victoryFrames: 0,
+    victoryStartedAt: 0,
     missingHandFrames: 0,
     palmStartedAt: 0,
     palmTriggered: false,
@@ -370,14 +371,17 @@
     handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
     const landmarks = results.multiHandLandmarks?.[0];
     if (!landmarks) {
+      // Never carry a possible capture gesture across a lost-tracking frame.
+      // Partial hands at the edge were the main source of false selfies.
+      state.victoryLatched = false;
+      state.victoryFrames = 0;
+      state.victoryStartedAt = 0;
       // Brief tracking gaps are common. Keep the active stroke alive for a few
       // frames instead of chopping handwriting into many tiny strokes.
       state.missingHandFrames += 1;
       if (state.missingHandFrames > 10) {
         commitStroke('hand');
         state.pinchLatched = false;
-        state.victoryLatched = false;
-        state.victoryFrames = 0;
         resetPalmProgress();
         setGesture('IDLE');
       }
@@ -391,13 +395,23 @@
     // A held reset gesture can be permissive because the 0.8 second timer
     // prevents accidental activation. This also tolerates one occluded finger.
     const openPalm = extendedCount >= 3 && !fingers.pinch;
-    const victory = fingers.index && fingers.middle && !fingers.ring && !fingers.pinky && !fingers.pinch;
+    const palmSize = Math.max(distance(landmarks[5], landmarks[17]), .001);
+    const capturePointsVisible = [0, 5, 9, 13, 17, 8, 12].every((index) => {
+      const mark = landmarks[index];
+      return mark.x > .04 && mark.x < .96 && mark.y > .04 && mark.y < .96;
+    });
+    const fingersSplit = distance(landmarks[8], landmarks[12]) / palmSize > .42;
+    const ringFolded = jointAngle(landmarks[16], landmarks[14], landmarks[13]) < 155;
+    const pinkyFolded = jointAngle(landmarks[20], landmarks[18], landmarks[17]) < 155;
+    const victory = capturePointsVisible && fingers.index && fingers.middle
+      && fingersSplit && ringFolded && pinkyFolded && !fingers.pinch;
 
     if (openPalm) {
       commitStroke('hand');
       state.pinchLatched = false;
       state.victoryLatched = false;
       state.victoryFrames = 0;
+      state.victoryStartedAt = 0;
       setGesture('PALM');
       if (!state.palmStartedAt) state.palmStartedAt = performance.now();
       const held = performance.now() - state.palmStartedAt;
@@ -415,10 +429,13 @@
     if (victory) {
       commitStroke('hand');
       setGesture('VICTORY');
+      if (!state.victoryStartedAt) state.victoryStartedAt = performance.now();
       state.victoryFrames += 1;
-      // Confirm over several frames to avoid taking a photo while the user is
-      // merely moving from an open palm into the drawing pose.
-      if (state.victoryFrames >= 3 && !state.victoryLatched && state.cameraActive && !state.captureInProgress) {
+      // Require a deliberate, stable V sign. Edge fragments cannot accumulate
+      // time because a single lost/invalid frame resets this confirmation.
+      const victoryHeld = performance.now() - state.victoryStartedAt;
+      if (state.victoryFrames >= 8 && victoryHeld >= 260
+        && !state.victoryLatched && state.cameraActive && !state.captureInProgress) {
         state.victoryLatched = true;
         startCountdown();
       }
@@ -426,6 +443,7 @@
     }
     state.victoryLatched = false;
     state.victoryFrames = 0;
+    state.victoryStartedAt = 0;
 
     if (fingers.pinch) {
       commitStroke('hand');
